@@ -1,3 +1,4 @@
+
 const express = require("express");
 const http = require("http");
 const WebSocket = require("ws");
@@ -26,11 +27,6 @@ app.post("/chat", async (req, res) => {
 
   if (typeof message !== "string" || !message.trim() || message.length > 4000)
     return res.status(400).json({ error: "Mensagem inválida." });
-
-  if (image && (typeof image !== "string" ||
-      image.length > 10 * 1024 * 1024 ||
-      !/^data:image\/(jpeg|jpg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(image)))
-    return res.status(400).json({ error: "Imagem inválida." });
 
   if (!GROQ)
     return res.status(500).json({ error: "GROQ_API_KEY ausente." });
@@ -67,14 +63,10 @@ app.post("/chat", async (req, res) => {
     );
 
     const data = await r.json();
-
-    if (!r.ok)
-      throw Error(data.error?.message || "Erro Groq");
+    if (!r.ok) throw Error(data.error?.message || "Erro Groq");
 
     const reply = data.choices?.[0]?.message?.content?.trim();
-
-    if (!reply)
-      throw Error("Resposta vazia.");
+    if (!reply) throw Error("Resposta vazia.");
 
     sessions.set(id, [
       ...history,
@@ -83,9 +75,8 @@ app.post("/chat", async (req, res) => {
     ].slice(-20));
 
     res.json({ reply });
-
   } catch (e) {
-    console.error("[GROQ] Erro:", e.message);
+    console.error("[GROQ]", e.message);
     res.status(502).json({ error: "Ema não conseguiu responder." });
   }
 });
@@ -96,25 +87,22 @@ app.post("/reset", (req, res) => {
 });
 
 const server = http.createServer(app);
-const wss = new WebSocket.Server({
-  server,
-  path: "/vision"
-});
+const wss = new WebSocket.Server({ server, path: "/vision" });
 
-wss.on("connection", (client) => {
+wss.on("connection", (client, req) => {
   const id = ++connectionCount;
   const log = (...args) => console.log(`[VISION #${id}]`, ...args);
 
   log("Cliente conectado.");
 
-  if (!TOKEN) {
-    log("ERRO: VISION_ACCESS_TOKEN não configurado.");
-    client.close(1008, "Token ausente");
+  if (!TOKEN || req.headers["x-vision-token"] !== TOKEN) {
+    log("Acesso negado: token ausente ou incorreto.");
+    client.close(1008, "Token inválido");
     return;
   }
 
   if (!GEMINI) {
-    log("ERRO: GEMINI_API_KEY não configurada.");
+    log("GEMINI_API_KEY ausente.");
     client.close(1008, "Gemini ausente");
     return;
   }
@@ -122,7 +110,7 @@ wss.on("connection", (client) => {
   let ready = false;
   let setupTimer;
 
-  const sendError = (message) => {
+  const sendError = message => {
     if (client.readyState === WebSocket.OPEN) {
       client.send(JSON.stringify({
         type: "error",
@@ -130,10 +118,6 @@ wss.on("connection", (client) => {
       }));
     }
   };
-
-  if (client.upgradeReq?.headers?.["x-vision-token"]) {
-    // Compatibilidade com versões antigas do ws.
-  }
 
   const gemini = new WebSocket(
     "wss://generativelanguage.googleapis.com/ws/" +
@@ -145,46 +129,40 @@ wss.on("connection", (client) => {
     let body = "";
 
     response.on("data", chunk => {
-      if (body.length < 4000)
-        body += chunk.toString();
+      if (body.length < 4000) body += chunk.toString();
     });
 
     response.on("end", () => {
-      log("FALHA HTTP DO GEMINI:", response.statusCode);
-      log("Resposta:", body || "(sem conteúdo)");
-      sendError(
-        "Gemini recusou a conexão. HTTP " + response.statusCode
-      );
-
+      log("ERRO HTTP GEMINI:", response.statusCode, body);
+      sendError("Erro HTTP Gemini: " + response.statusCode);
       if (client.readyState === WebSocket.OPEN)
-        client.close(1011, "Falha HTTP Gemini");
+        client.close(1011, "Falha Gemini");
     });
   });
 
   gemini.on("open", () => {
-    log("Conexão com Gemini aberta.");
+    log("Gemini conectado. Enviando configuração...");
 
     gemini.send(JSON.stringify({
       setup: {
         model: `models/${LIVE_MODEL}`,
         generationConfig: {
-          responseModalities: ["TEXT"]
+          responseModalities: ["AUDIO"]
         },
+        outputAudioTranscription: {},
         systemInstruction: {
           parts: [{
             text: personality +
-              " Observe a tela enviada e explique o que está acontecendo quando solicitado."
+              " Observe a tela enviada e explique o que está acontecendo quando solicitado. Responda em português brasileiro."
           }]
         }
       }
     }));
 
-    log("Configuração enviada. Aguardando setupComplete...");
-
     setupTimer = setTimeout(() => {
       if (!ready) {
-        log("TIMEOUT: Gemini não enviou setupComplete.");
-        sendError("Gemini demorou para concluir a configuração.");
+        log("TIMEOUT aguardando configuração Gemini.");
+        sendError("Gemini não concluiu a configuração.");
         gemini.close();
       }
     }, 20000);
@@ -196,52 +174,66 @@ wss.on("connection", (client) => {
     try {
       data = JSON.parse(raw.toString());
     } catch (e) {
-      log("Mensagem inválida recebida do Gemini:", e.message);
+      log("JSON inválido:", e.message);
       return;
     }
 
     if (data.setupComplete) {
       ready = true;
       clearTimeout(setupTimer);
-
       log("Gemini pronto!");
 
-      if (client.readyState === WebSocket.OPEN) {
+      if (client.readyState === WebSocket.OPEN)
         client.send(JSON.stringify({ type: "ready" }));
-      }
 
       return;
     }
 
     if (data.error) {
-      const detail = JSON.stringify(data.error);
+      log("ERRO GEMINI:", JSON.stringify(data.error));
+      sendError(data.error.message || "Erro Gemini");
+      return;
+    }
 
-      log("ERRO RETORNADO PELO GEMINI:", detail);
-      sendError(data.error.message || detail);
+    // Transforma a transcrição em texto no formato
+    // que o aplicativo Android já utiliza.
+    if (data.outputTranscription?.text) {
+      if (data.outputTranscription.finished !== false) {
+        const text = data.outputTranscription.text;
+
+        log("Transcrição recebida:", text.slice(0, 150));
+
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(JSON.stringify({
+            type: "gemini",
+            data: {
+              serverContent: {
+                modelTurn: {
+                  parts: [{ text }]
+                }
+              }
+            }
+          }));
+        }
+      }
+
       return;
     }
 
     if (client.readyState === WebSocket.OPEN) {
-      client.send(JSON.stringify({
-        type: "gemini",
-        data
-      }));
+      client.send(JSON.stringify({ type: "gemini", data }));
     }
   });
 
   client.on("message", raw => {
-    if (!ready || gemini.readyState !== WebSocket.OPEN)
-      return;
+    if (!ready || gemini.readyState !== WebSocket.OPEN) return;
 
     try {
       const p = JSON.parse(raw.toString());
 
       if (p.type === "frame") {
         if (typeof p.data !== "string" ||
-            p.data.length > 2 * 1024 * 1024) {
-          log("Frame ignorado: formato ou tamanho inválido.");
-          return;
-        }
+            p.data.length > 2 * 1024 * 1024) return;
 
         gemini.send(JSON.stringify({
           realtimeInput: {
@@ -260,34 +252,29 @@ wss.on("connection", (client) => {
           }
         }));
       }
-
     } catch (e) {
-      log("Erro ao processar mensagem do app:", e.message);
+      log("Erro ao processar mensagem:", e.message);
     }
   });
 
   gemini.on("error", e => {
     log("ERRO DE CONEXÃO GEMINI:", e.message);
-    sendError("Falha na conexão Gemini: " + e.message);
+    sendError("Falha Gemini: " + e.message);
   });
 
   gemini.on("close", (code, reason) => {
     clearTimeout(setupTimer);
-
-    const explanation = reason.toString() || "(sem motivo informado)";
-    log("GEMINI FECHOU:", "Código:", code, "| Motivo:", explanation);
+    log("GEMINI FECHOU:", code, reason.toString());
 
     if (client.readyState === WebSocket.OPEN) {
-      sendError("Gemini fechou a conexão. Código: " + code +
-        ". Motivo: " + explanation);
+      sendError("Gemini desconectou: " + code + " " + reason);
       client.close(1011, "Gemini desconectado");
     }
   });
 
   client.on("close", (code, reason) => {
     clearTimeout(setupTimer);
-    log("APP DESCONECTOU:", "Código:", code,
-      "| Motivo:", reason.toString() || "(sem motivo)");
+    log("APP DESCONECTOU:", code, reason.toString());
 
     if (gemini.readyState === WebSocket.OPEN)
       gemini.close();
@@ -296,11 +283,13 @@ wss.on("connection", (client) => {
   });
 
   client.on("error", e => {
-    log("ERRO NO WEBSOCKET DO APP:", e.message);
+    log("ERRO APP:", e.message);
   });
 });
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log("Ema online!");
-  console.log("Modelo Gemini Live:", LIVE_MODEL);
+  console.log("Groq:", MODEL);
+  console.log("Gemini Live:", LIVE_MODEL);
+  console.log("Visão WebSocket: /vision");
 });
