@@ -6,7 +6,7 @@ app.use(express.json({ limit: "32kb" }));
 
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.GROQ_API_KEY;
-const MODEL = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
+const MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-20b";
 
 const sessions = new Map();
 
@@ -71,7 +71,6 @@ app.post("/chat", async (req, res) => {
 
   const now = Date.now();
 
-  // Limpa sessões antigas
   for (const [key, value] of sessions) {
     if (now - value.updated > 3 * 60 * 60 * 1000) {
       sessions.delete(key);
@@ -152,7 +151,6 @@ app.post("/chat", async (req, res) => {
       content: reply
     });
 
-    // Mantém apenas as últimas 20 mensagens
     session.messages = session.messages.slice(-20);
     session.updated = Date.now();
 
