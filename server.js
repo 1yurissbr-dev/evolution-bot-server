@@ -24,25 +24,30 @@ app.post("/chat", async (req, res) => {
       });
     }
 
-    const apiKey = process.env.OPENAI_API_KEY;
+    const apiKey = process.env.GEMINI_API_KEY;
 
     if (!apiKey) {
       return res.status(500).json({
-        error: "A chave da IA não foi configurada."
+        error: "A chave do Gemini não foi configurada."
       });
     }
 
     const response = await fetch(
-      "https://api.openai.com/v1/responses",
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent",
       {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${apiKey}`
+          "x-goog-api-key": apiKey
         },
         body: JSON.stringify({
-          model: "gpt-6.1-sol",
-          input: message
+          contents: [
+            {
+              parts: [
+                { text: message }
+              ]
+            }
+          ]
         })
       }
     );
@@ -50,18 +55,21 @@ app.post("/chat", async (req, res) => {
     const data = await response.json();
 
     if (!response.ok) {
-      console.error("Erro na API:", response.status);
+      console.error(
+        "Erro Gemini:",
+        response.status,
+        data.error?.message || "Erro desconhecido"
+      );
 
       return res.status(502).json({
         error: "Não foi possível consultar a IA."
       });
     }
 
-    const reply = (data.output || [])
-      .flatMap(item => item.content || [])
-      .filter(item => item.type === "output_text")
-      .map(item => item.text)
-      .join("\n");
+    const reply = data.candidates?.[0]?.content?.parts
+      ?.map(part => part.text || "")
+      .join("\n")
+      .trim();
 
     if (!reply) {
       return res.status(502).json({
